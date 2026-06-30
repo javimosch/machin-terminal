@@ -31,16 +31,19 @@ a shell, full-screen TUIs, and **tmux**. Multiplexing is tmux's job (see VISION)
   an app holds the mouse), copy to the system clipboard, paste via middle-click /
   Ctrl+Shift+V with **bracketed paste** (`?2004`). Selection-text extraction verified
   headlessly; the drag + clipboard FFI need interactive testing.
+- **9 — Theming delegated to the shell.** Theming lives in zsh + omz/p10k, not here
+  (see [VISION.md](VISION.md)). The terminal owns only the two pieces the shell can't:
+  **OSC 4 / 10 / 11** (palette + default fg/bg, so `base16-shell`-style scripts repaint
+  it) and a **configurable Nerd-Font** (`MTERM_FONT` / `MTERM_FONT_SIZE` + baked
+  powerline/PUA glyphs) so p10k icons render. OSC parsing verified headlessly.
 
 ## Next — daily-driver quality
 
-- **9 — Text attributes.** Bold (distinct from bright), underline, italic, dim,
+- **10 — Text attributes.** Bold (distinct from bright), underline, italic, dim,
   inverse already done; strike. Needs bold/italic font faces or synthesis.
-- **10 — Native scrollback.** Backlog above the viewport with wheel/PageUp.
+- **11 — Native scrollback.** Backlog above the viewport with wheel/PageUp.
   *Lower priority:* in a tmux-centric workflow tmux owns scrollback; this mainly
   helps the moments you're outside tmux.
-- **11 — Configuration.** Font family/size, color palette, default geometry,
-  cursor style — via a simple file or flags.
 
 ## Polish / correctness backlog
 
@@ -52,5 +55,6 @@ a shell, full-screen TUIs, and **tmux**. Multiplexing is tmux's job (see VISION)
 
 ## Explicit non-goals
 
-Native tiling / tabs / splits / sessions (**use tmux**); a plugin/scripting runtime;
-being a multiplexer or window manager. See [VISION.md](VISION.md).
+Native tiling / tabs / splits / sessions (**use tmux**); prompt themes / color schemes
+(**use zsh + omz/p10k**; the terminal owns only the OSC palette + font); a plugin/
+scripting runtime; being a multiplexer or window manager. See [VISION.md](VISION.md).

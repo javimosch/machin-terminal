@@ -48,6 +48,30 @@ multiplexer), machin-terminal is **"a minimal correct terminal; tmux is the
 multiplexer."** The headline acceptance test becomes: *does tmux run flawlessly
 inside it?*
 
+## The theming thesis (delegate the prompt to zsh / Oh My Zsh)
+
+The same logic applies one layer up. The **prompt, git status, syntax highlighting,
+and per-character colors** are the shell's job — Oh My Zsh / Powerlevel10k emit them
+as SGR sequences + glyphs, and the terminal already renders those. So machin-terminal
+builds **no** prompt themes, color schemes, or prompt config. The intended stack is:
+
+> **machin-terminal** (the glass) → **tmux** (multiplexing) → **zsh + omz/p10k**
+> (prompt, theme, highlighting).
+
+Only two pieces of "theming" can't be delegated, because the shell physically can't do
+them — and the terminal owns exactly those, minimally:
+
+1. **The ANSI palette + default fg/bg.** The terminal defines what "green" (SGR 32)
+   looks like. But we hand even this back to the shell: **OSC 4 / 10 / 11** let a
+   startup script (`base16-shell`, an omz theme) repaint the palette. So palette
+   theming is *also* a shell-startup concern, not a built-in config format.
+2. **The font.** p10k's icons are Nerd-Font glyphs the shell can't supply — the
+   terminal must load a font that has them. Hence a configurable font path
+   (`MTERM_FONT`) + baked powerline/PUA glyph ranges. This is the one irreducible
+   terminal-side "theme" responsibility.
+
+Everything else about how your terminal *looks* lives in your `~/.zshrc`, not here.
+
 ## What "done enough to daily-drive" means
 
 - Runs a login shell, `vim`, `htop`, `less`, `git`, and **tmux** with no visible
@@ -60,6 +84,8 @@ inside it?*
 ## Non-goals (by design)
 
 - **Native tiling / tabs / splits / sessions** — use tmux.
+- **Prompt themes / color schemes / prompt config** — use zsh + Oh My Zsh / p10k
+  (the terminal only owns the palette via OSC and the font).
 - A config language, plugin system, or scripting runtime — keep it small.
 - Being a multiplexer or a window manager.
 

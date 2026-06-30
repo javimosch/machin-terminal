@@ -30,25 +30,36 @@ there are no native tabs/splits ([why](docs/VISION.md)).
   solid lines**.
 - **Step 5 — mouse reporting**: X10 + SGR (`?1006`) encoding to the PTY — button
   press/release, wheel, drag (`?1002`/`?1003`), and shift/alt/ctrl modifiers.
+- **Step 6 — perf**: `O(rows)` scroll via a row-pointer map — realistic cat-like
+  throughput **41 → 144 MB/s** (see [docs/BENCHMARK.md](docs/BENCHMARK.md)).
+- **Step 7 — selection + clipboard**: drag-to-select (or Shift-drag), copy on release /
+  Ctrl+Shift+C, paste via middle-click / Ctrl+Shift+V with bracketed paste.
+- **Step 8 — OSC palette + fonts**: OSC 4/10/11 (shell sets the palette), configurable
+  Nerd-Font (`MTERM_FONT`) + powerline glyphs.
 
 **Verified running `vim`, `htop`, and `tmux`**, with correct alt-screen enter/restore.
 Optional dev hook: set `MTERM_SEED="cmd\r"` to type a command into the shell at startup
 (used for headless screenshot testing).
 
-## Roadmap
+## Theming
 
-Next up (see [docs/ROADMAP.md](docs/ROADMAP.md)): mouse selection + clipboard, bold/
-underline/italic attributes, native scrollback, configurable font/colors. Native
-tiling/tabs are a **non-goal** — that's tmux's job.
+Theming is delegated to the shell — use **zsh + [Oh My Zsh](https://ohmyz.sh/) /
+[Powerlevel10k](https://github.com/romkatv/powerlevel10k)** for your prompt, git
+status, and colors. machin-terminal owns only what the shell can't: the palette
+(set it from your `~/.zshrc` via OSC 4/10/11, e.g. `base16-shell`) and the font.
+Point `MTERM_FONT` at a Nerd Font for p10k icons. Native prompt themes are a
+**non-goal** ([why](docs/VISION.md)).
 
 ## Build & run
 
 ```sh
-./build.sh                 # vendors static raylib 5.0 if needed, builds ./machin-terminal
+./build.sh                       # vendors static raylib 5.0 if needed, builds ./machin-terminal
 DISPLAY=:0 ./machin-terminal
+
+MTERM_FONT=~/.fonts/MesloLGS-NF.ttf MTERM_FONT_SIZE=22 ./machin-terminal   # custom font
 ```
 
-Requires a monospace font at `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`.
+Defaults to `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` if `MTERM_FONT` is unset.
 
 ## Links
 
