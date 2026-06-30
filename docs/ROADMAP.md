@@ -16,21 +16,14 @@ a shell, full-screen TUIs, and **tmux**. Multiplexing is tmux's job (see VISION)
   app-cursor-keys (`?1`), resizable window → `ioctl(TIOCSWINSZ)`/SIGWINCH,
   `TERM=xterm-256color`. **Verified: `vim`, `htop`, alt-screen enter/restore.**
   **tmux verified running** (panes/splits/status bar render).
-
-## Now — make tmux (and Unicode TUIs) pixel-perfect
-
-These are the gaps the tmux run exposed. They are the critical path.
-
-- **4 — UTF-8 output decoding.** Accumulate multi-byte UTF-8 from the PTY into a
-  single codepoint before `putc`. Today each byte is treated as its own codepoint,
-  so box-drawing/accented/symbol glyphs shatter into garbage. *(Blocks tmux borders,
-  any non-ASCII output.)*
-- **5 — Font glyph coverage.** `LoadFontEx` currently loads only 95 ASCII glyphs;
-  anything above renders as `?`. Load Latin-1 + box-drawing (U+2500–U+257F) + block
-  elements + common symbols (and a sane fallback). *(With #4, fixes the tmux `???`.)*
-- **6 — Mouse reporting passthrough.** Encode X10/SGR (1006) mouse events to the PTY
-  so the mouse works in tmux, vim, less. Probably the biggest usability gap after
-  glyphs.
+- **4 — UTF-8 output decoding.** Multi-byte UTF-8 from the PTY is accumulated into a
+  single codepoint before `putc`. **Verified: tmux box-drawing borders render.**
+- **5 — Font glyph coverage.** `LoadFontEx` bakes ASCII + Latin-1 + general
+  punctuation + arrows + box-drawing/blocks/shapes + Braille into the atlas.
+- **6 — Mouse reporting.** X10 and SGR (1006) encoding to the PTY: button
+  press/release, wheel, drag (button-event 1002 / any-event 1003), and
+  shift/alt/ctrl modifiers. *(Click injection not auto-tested here — no xdotool;
+  verified against the xterm spec.)*
 
 ## Next — daily-driver quality
 
