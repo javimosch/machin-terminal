@@ -1,0 +1,1027 @@
+// machin-terminal — step 3: a VT100/xterm-subset terminal in pure MFL.
+//
+//   PTY (forkpty bash, non-blocking)  ->  VT escape parser  ->  raylib glyph grid
+//   keystroke -> byte encoder  ->  PTY ;  window resize -> ioctl(TIOCSWINSZ)
+//
+// Over step 2 this adds the machinery full-screen TUIs need:
+//   * alt-screen buffer (DEC ?47/?1047/?1049) — vim/htop/less stop corrupting scrollback
+//   * scroll region (DECSTBM, CSI r) + IND/RI/NEL, scroll up/down (SU/SD)
+//   * insert/delete lines (IL/DL) and chars (ICH/DCH/ECH)
+//   * save/restore cursor (DECSC/DECRC = ESC 7/8, CSI s/u, ?1048)
+//   * reverse video (SGR 7/27), cursor visibility (?25), app cursor keys (?1)
+//   * a resizable window: recompute rows/cols and SIGWINCH the shell via ioctl
+//
+//   build:  ./build.sh     run:  DISPLAY=:0 ./machin-terminal
+
+extern "raylib" {
+	cflags "-I/tmp/rl/raylib-5.0_linux_amd64/include -L/tmp/rl/raylib-5.0_linux_amd64/lib"
+	header "raylib.h"
+	link ":libraylib.a"
+	link "m"
+	link "pthread"
+	link "dl"
+	link "rt"
+	link "X11"
+	link "GL"
+	cstruct Color { r u8 g u8 b u8 a u8 }
+	cstruct Vector2 { x f32 y f32 }
+	cstruct Font {}
+	fn SetConfigFlags(i32)
+	fn InitWindow(i32, i32, string)
+	fn CloseWindow()
+	fn WindowShouldClose() bool
+	fn SetTargetFPS(i32)
+	fn SetWindowSize(i32, i32)
+	fn GetScreenWidth() i32
+	fn GetScreenHeight() i32
+	fn BeginDrawing()
+	fn EndDrawing()
+	fn ClearBackground(Color)
+	fn DrawRectangle(i32, i32, i32, i32, Color)
+	fn LoadFontEx(string, i32, ptr, i32) Font
+	fn MeasureTextEx(Font, string, f32, f32) Vector2
+	fn DrawTextCodepoint(Font, i32, Vector2, f32, Color)
+	fn GetCharPressed() i32
+	fn IsKeyPressed(i32) bool
+	fn IsKeyDown(i32) bool
+}
+
+extern "pty" { cflags "-lutil" header "pty.h" fn forkpty(ptr, ptr, ptr, ptr) i32 }
+extern "uc" { header "unistd.h" fn read(i32, ptr, i32) i32 fn write(i32, ptr, i32) i32 fn execvp(string, ptr) i32 fn _exit(i32) }
+extern "fc" { header "fcntl.h" fn fcntl(i32, i32, i32) i32 }
+extern "wt" { header "sys/wait.h" fn waitpid(i32, ptr, i32) i32 }
+extern "io" { header "sys/ioctl.h" fn ioctl(i32, i32, ptr) i32 }
+extern "se" { header "stdlib.h" fn setenv(string, string, i32) i32 }
+
+type Term struct {
+	cols int
+	rows int
+	cx int
+	cy int
+	fg int
+	bg int
+	bold int
+	rev int
+	curvis int
+	appcur int
+	alt int
+	top int
+	bot int
+	ch []int
+	cfg []int
+	cbg []int
+	mch []int
+	mcfg []int
+	mcbg []int
+	ach []int
+	acfg []int
+	acbg []int
+	st int
+	u8need int
+	u8cp int
+	params []int
+	cur int
+	has int
+	priv int
+	savcx int
+	savcy int
+	savfg int
+	savbg int
+	savbold int
+	savrev int
+	master int
+	pid int
+}
+
+var T = Term{}
+var FS = 20.0
+var DEF_FG = 0xd3d7cf
+var DEF_BG = 0x000000
+var PAL = []int{}
+var RBUF = 0
+var KBUF = 0
+var WSTAT = 0
+var WSZ = 0
+
+func cstr(s) (p) {
+	n := len(s)
+	b := bytes(s)
+	p = alloc(n + 1)
+	i := 0
+	for i < n {
+		poke_u8(p, i, byte_at(b, i))
+		i = i + 1
+	}
+	poke_u8(p, n, 0)
+}
+
+func mx(a, b) (v) {
+	if a > b {
+		v = a
+	} else {
+		v = b
+	}
+}
+
+func clampi(v, lo, hi) (o) {
+	o = v
+	if o < lo {
+		o = lo
+	}
+	if o > hi {
+		o = hi
+	}
+}
+
+func pn(i, def) (v) {
+	if i < len(T.params) {
+		v = T.params[i]
+	} else {
+		v = def
+	}
+}
+
+func initPalette() {
+	PAL = []int{0x000000, 0xcc0000, 0x4e9a06, 0xc4a000, 0x3465a4, 0x75507b, 0x06989a, 0xd3d7cf, 0x555753, 0xef2929, 0x8ae234, 0xfce94f, 0x729fcf, 0xad7fa8, 0x34e2e2, 0xeeeeec}
+}
+
+func zeros(n) (s) {
+	s = []int{}
+	i := 0
+	for i < n {
+		s = append(s, 0)
+		i = i + 1
+	}
+}
+
+func appendRange(s, lo, hi) (out) {
+	out = s
+	c := lo
+	for c <= hi {
+		out = append(out, c)
+		c = c + 1
+	}
+}
+
+// Codepoints to bake into the font atlas: ASCII + Latin-1, general punctuation
+// (dashes/quotes/bullets), arrows, box-drawing + block elements + geometric shapes
+// (tmux/TUI borders), and Braille (spinners/btop). Anything else renders as '?'.
+func buildCodepoints() (buf, count) {
+	cps := []int{}
+	cps = appendRange(cps, 0x20, 0xFF)
+	cps = appendRange(cps, 0x2010, 0x2027)
+	cps = appendRange(cps, 0x2190, 0x21FF)
+	cps = appendRange(cps, 0x2500, 0x25FF)
+	cps = appendRange(cps, 0x2800, 0x28FF)
+	count = len(cps)
+	buf = alloc(count * 4)
+	i := 0
+	for i < count {
+		poke_i32(buf, i*4, cps[i])
+		i = i + 1
+	}
+}
+
+func rgb3(r, g, b) (v) {
+	v = ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
+}
+
+func xterm256(n) (rgb) {
+	if n < 16 {
+		rgb = PAL[n]
+	} else if n < 232 {
+		m := n - 16
+		r := m / 36
+		g := (m / 6) % 6
+		b := m % 6
+		rr := 0
+		gg := 0
+		bb := 0
+		if r > 0 {
+			rr = r * 40 + 55
+		}
+		if g > 0 {
+			gg = g * 40 + 55
+		}
+		if b > 0 {
+			bb = b * 40 + 55
+		}
+		rgb = (rr << 16) | (gg << 8) | bb
+	} else {
+		v := (n - 232) * 10 + 8
+		rgb = (v << 16) | (v << 8) | v
+	}
+}
+
+func blankCell(i) {
+	T.ch[i] = 32
+	T.cfg[i] = T.fg
+	T.cbg[i] = T.bg
+}
+
+func clearRow(r) {
+	base := r * T.cols
+	c := 0
+	for c < T.cols {
+		blankCell(base + c)
+		c = c + 1
+	}
+}
+
+func clearAll() {
+	tot := T.rows * T.cols
+	i := 0
+	for i < tot {
+		blankCell(i)
+		i = i + 1
+	}
+}
+
+func copyRow(src, dst) {
+	s := src * T.cols
+	d := dst * T.cols
+	c := 0
+	for c < T.cols {
+		T.ch[d+c] = T.ch[s+c]
+		T.cfg[d+c] = T.cfg[s+c]
+		T.cbg[d+c] = T.cbg[s+c]
+		c = c + 1
+	}
+}
+
+func scrollRegionUp(n) {
+	k := 0
+	for k < n {
+		r := T.top
+		for r < T.bot {
+			copyRow(r+1, r)
+			r = r + 1
+		}
+		clearRow(T.bot)
+		k = k + 1
+	}
+}
+
+func scrollRegionDown(n) {
+	k := 0
+	for k < n {
+		r := T.bot
+		for r > T.top {
+			copyRow(r-1, r)
+			r = r - 1
+		}
+		clearRow(T.top)
+		k = k + 1
+	}
+}
+
+func insertLines(n) {
+	if T.cy < T.top || T.cy > T.bot {
+		return
+	}
+	k := 0
+	for k < n {
+		r := T.bot
+		for r > T.cy {
+			copyRow(r-1, r)
+			r = r - 1
+		}
+		clearRow(T.cy)
+		k = k + 1
+	}
+}
+
+func deleteLines(n) {
+	if T.cy < T.top || T.cy > T.bot {
+		return
+	}
+	k := 0
+	for k < n {
+		r := T.cy
+		for r < T.bot {
+			copyRow(r+1, r)
+			r = r + 1
+		}
+		clearRow(T.bot)
+		k = k + 1
+	}
+}
+
+func insertChars(n) {
+	base := T.cy * T.cols
+	c := T.cols - 1
+	for c >= T.cx+n {
+		T.ch[base+c] = T.ch[base+c-n]
+		T.cfg[base+c] = T.cfg[base+c-n]
+		T.cbg[base+c] = T.cbg[base+c-n]
+		c = c - 1
+	}
+	lim := T.cx + n
+	if lim > T.cols {
+		lim = T.cols
+	}
+	c = T.cx
+	for c < lim {
+		blankCell(base + c)
+		c = c + 1
+	}
+}
+
+func deleteChars(n) {
+	base := T.cy * T.cols
+	c := T.cx
+	for c < T.cols {
+		if c+n < T.cols {
+			T.ch[base+c] = T.ch[base+c+n]
+			T.cfg[base+c] = T.cfg[base+c+n]
+			T.cbg[base+c] = T.cbg[base+c+n]
+		} else {
+			blankCell(base + c)
+		}
+		c = c + 1
+	}
+}
+
+func eraseChars(n) {
+	base := T.cy * T.cols
+	lim := T.cx + n
+	if lim > T.cols {
+		lim = T.cols
+	}
+	c := T.cx
+	for c < lim {
+		blankCell(base + c)
+		c = c + 1
+	}
+}
+
+func lf() {
+	if T.cy == T.bot {
+		scrollRegionUp(1)
+	} else if T.cy < T.rows-1 {
+		T.cy = T.cy + 1
+	}
+}
+
+func ri() {
+	if T.cy == T.top {
+		scrollRegionDown(1)
+	} else if T.cy > 0 {
+		T.cy = T.cy - 1
+	}
+}
+
+func putc(cp) {
+	fg := T.fg
+	bg := T.bg
+	if T.rev == 1 {
+		fg = T.bg
+		bg = T.fg
+	}
+	i := T.cy * T.cols + T.cx
+	T.ch[i] = cp
+	T.cfg[i] = fg
+	T.cbg[i] = bg
+	T.cx = T.cx + 1
+	if T.cx >= T.cols {
+		T.cx = 0
+		lf()
+	}
+}
+
+func tab() {
+	T.cx = ((T.cx / 8) + 1) * 8
+	if T.cx >= T.cols {
+		T.cx = T.cols - 1
+	}
+}
+
+func eraseDisp(mode) {
+	tot := T.rows * T.cols
+	s := 0
+	e := tot
+	if mode == 0 {
+		s = T.cy * T.cols + T.cx
+	} else if mode == 1 {
+		e = T.cy * T.cols + T.cx + 1
+	}
+	i := s
+	for i < e {
+		blankCell(i)
+		i = i + 1
+	}
+}
+
+func eraseLine(mode) {
+	base := T.cy * T.cols
+	s := 0
+	e := T.cols
+	if mode == 0 {
+		s = T.cx
+	} else if mode == 1 {
+		e = T.cx + 1
+	}
+	c := s
+	for c < e {
+		blankCell(base + c)
+		c = c + 1
+	}
+}
+
+func sgr() {
+	np := len(T.params)
+	if np == 0 {
+		T.fg = DEF_FG
+		T.bg = DEF_BG
+		T.bold = 0
+		T.rev = 0
+		return
+	}
+	i := 0
+	for i < np {
+		v := T.params[i]
+		if v == 0 {
+			T.fg = DEF_FG
+			T.bg = DEF_BG
+			T.bold = 0
+			T.rev = 0
+		} else if v == 1 {
+			T.bold = 1
+		} else if v == 7 {
+			T.rev = 1
+		} else if v == 22 {
+			T.bold = 0
+		} else if v == 27 {
+			T.rev = 0
+		} else if v >= 30 && v <= 37 {
+			k := v - 30
+			if T.bold == 1 {
+				k = k + 8
+			}
+			T.fg = PAL[k]
+		} else if v == 39 {
+			T.fg = DEF_FG
+		} else if v >= 40 && v <= 47 {
+			T.bg = PAL[v-40]
+		} else if v == 49 {
+			T.bg = DEF_BG
+		} else if v >= 90 && v <= 97 {
+			T.fg = PAL[v-90+8]
+		} else if v >= 100 && v <= 107 {
+			T.bg = PAL[v-100+8]
+		} else if v == 38 {
+			if i+2 < np && T.params[i+1] == 5 {
+				T.fg = xterm256(T.params[i+2])
+				i = i + 2
+			} else if i+4 < np && T.params[i+1] == 2 {
+				T.fg = rgb3(T.params[i+2], T.params[i+3], T.params[i+4])
+				i = i + 4
+			}
+		} else if v == 48 {
+			if i+2 < np && T.params[i+1] == 5 {
+				T.bg = xterm256(T.params[i+2])
+				i = i + 2
+			} else if i+4 < np && T.params[i+1] == 2 {
+				T.bg = rgb3(T.params[i+2], T.params[i+3], T.params[i+4])
+				i = i + 4
+			}
+		}
+		i = i + 1
+	}
+}
+
+func saveCursor() {
+	T.savcx = T.cx
+	T.savcy = T.cy
+	T.savfg = T.fg
+	T.savbg = T.bg
+	T.savbold = T.bold
+	T.savrev = T.rev
+}
+
+func restoreCursor() {
+	T.cx = T.savcx
+	T.cy = T.savcy
+	T.fg = T.savfg
+	T.bg = T.savbg
+	T.bold = T.savbold
+	T.rev = T.savrev
+}
+
+func altSwitch(on) {
+	if on == true {
+		if T.alt == 1 {
+			return
+		}
+		T.alt = 1
+		T.ch = T.ach
+		T.cfg = T.acfg
+		T.cbg = T.acbg
+	} else {
+		if T.alt == 0 {
+			return
+		}
+		T.alt = 0
+		T.ch = T.mch
+		T.cfg = T.mcfg
+		T.cbg = T.mcbg
+	}
+}
+
+func privMode(b) {
+	set := b == 104
+	p := pn(0, 0)
+	if p == 25 {
+		if set {
+			T.curvis = 1
+		} else {
+			T.curvis = 0
+		}
+	} else if p == 1 {
+		if set {
+			T.appcur = 1
+		} else {
+			T.appcur = 0
+		}
+	} else if p == 47 || p == 1047 {
+		if set {
+			altSwitch(true)
+			clearAll()
+			T.cx = 0
+			T.cy = 0
+		} else {
+			altSwitch(false)
+		}
+	} else if p == 1048 {
+		if set {
+			saveCursor()
+		} else {
+			restoreCursor()
+		}
+	} else if p == 1049 {
+		if set {
+			saveCursor()
+			altSwitch(true)
+			clearAll()
+			T.cx = 0
+			T.cy = 0
+		} else {
+			altSwitch(false)
+			restoreCursor()
+		}
+	}
+}
+
+func csiDispatch(b) {
+	if T.priv == 1 {
+		privMode(b)
+		return
+	}
+	p0 := pn(0, 0)
+	if b == 109 {
+		sgr()
+	} else if b == 72 || b == 102 {
+		r := pn(0, 1)
+		c := pn(1, 1)
+		if r < 1 {
+			r = 1
+		}
+		if c < 1 {
+			c = 1
+		}
+		T.cy = clampi(r-1, 0, T.rows-1)
+		T.cx = clampi(c-1, 0, T.cols-1)
+	} else if b == 65 {
+		T.cy = clampi(T.cy-mx(1, p0), 0, T.rows-1)
+	} else if b == 66 {
+		T.cy = clampi(T.cy+mx(1, p0), 0, T.rows-1)
+	} else if b == 67 {
+		T.cx = clampi(T.cx+mx(1, p0), 0, T.cols-1)
+	} else if b == 68 {
+		T.cx = clampi(T.cx-mx(1, p0), 0, T.cols-1)
+	} else if b == 71 {
+		T.cx = clampi(mx(1, p0)-1, 0, T.cols-1)
+	} else if b == 100 {
+		T.cy = clampi(mx(1, p0)-1, 0, T.rows-1)
+	} else if b == 74 {
+		eraseDisp(p0)
+	} else if b == 75 {
+		eraseLine(p0)
+	} else if b == 114 {
+		t := pn(0, 1)
+		bb := pn(1, T.rows)
+		if t < 1 {
+			t = 1
+		}
+		if bb > T.rows {
+			bb = T.rows
+		}
+		if t < bb {
+			T.top = t - 1
+			T.bot = bb - 1
+			T.cx = 0
+			T.cy = T.top
+		}
+	} else if b == 76 {
+		insertLines(mx(1, p0))
+	} else if b == 77 {
+		deleteLines(mx(1, p0))
+	} else if b == 64 {
+		insertChars(mx(1, p0))
+	} else if b == 80 {
+		deleteChars(mx(1, p0))
+	} else if b == 88 {
+		eraseChars(mx(1, p0))
+	} else if b == 83 {
+		scrollRegionUp(mx(1, p0))
+	} else if b == 84 {
+		scrollRegionDown(mx(1, p0))
+	} else if b == 115 {
+		saveCursor()
+	} else if b == 117 {
+		restoreCursor()
+	}
+}
+
+func feed(b) {
+	if T.st == 0 {
+		if b >= 0x80 {
+			if b >= 0xC0 {
+				if b >= 0xF0 {
+					T.u8need = 3
+					T.u8cp = b & 0x07
+				} else if b >= 0xE0 {
+					T.u8need = 2
+					T.u8cp = b & 0x0F
+				} else {
+					T.u8need = 1
+					T.u8cp = b & 0x1F
+				}
+			} else if T.u8need > 0 {
+				T.u8cp = (T.u8cp << 6) | (b & 0x3F)
+				T.u8need = T.u8need - 1
+				if T.u8need == 0 {
+					putc(T.u8cp)
+				}
+			}
+		} else if b == 27 {
+			T.u8need = 0
+			T.st = 1
+		} else if b == 10 {
+			T.u8need = 0
+			lf()
+		} else if b == 13 {
+			T.u8need = 0
+			T.cx = 0
+		} else if b == 8 {
+			T.u8need = 0
+			if T.cx > 0 {
+				T.cx = T.cx - 1
+			}
+		} else if b == 9 {
+			T.u8need = 0
+			tab()
+		} else if b == 7 {
+			T.u8need = 0
+		} else if b >= 32 {
+			T.u8need = 0
+			putc(b)
+		}
+	} else if T.st == 1 {
+		if b == 91 {
+			T.st = 2
+			T.params = []int{}
+			T.cur = 0
+			T.has = 0
+			T.priv = 0
+		} else if b == 93 {
+			T.st = 3
+		} else if b == 40 || b == 41 {
+			T.st = 4
+		} else if b == 55 {
+			saveCursor()
+			T.st = 0
+		} else if b == 56 {
+			restoreCursor()
+			T.st = 0
+		} else if b == 77 {
+			ri()
+			T.st = 0
+		} else if b == 68 {
+			lf()
+			T.st = 0
+		} else if b == 69 {
+			T.cx = 0
+			lf()
+			T.st = 0
+		} else {
+			T.st = 0
+		}
+	} else if T.st == 2 {
+		if b >= 48 && b <= 57 {
+			T.cur = T.cur*10 + (b - 48)
+			T.has = 1
+		} else if b == 59 {
+			T.params = append(T.params, T.cur)
+			T.cur = 0
+			T.has = 0
+		} else if b == 63 {
+			T.priv = 1
+		} else if b >= 64 && b <= 126 {
+			T.params = append(T.params, T.cur)
+			csiDispatch(b)
+			T.st = 0
+		}
+	} else if T.st == 3 {
+		if b == 7 {
+			T.st = 0
+		} else if b == 27 {
+			T.st = 5
+		}
+	} else if T.st == 4 {
+		T.st = 0
+	} else if T.st == 5 {
+		T.st = 0
+	}
+}
+
+func drainPty() {
+	loops := 0
+	for loops < 512 {
+		n := read(T.master, RBUF, 4096)
+		if n <= 0 {
+			return
+		}
+		i := 0
+		for i < n {
+			base := i - (i & 3)
+			w := peek_i32(RBUF, base)
+			sh := (i & 3) * 8
+			feed((w >> sh) & 255)
+			i = i + 1
+		}
+		loops = loops + 1
+	}
+}
+
+func sendByte(b) {
+	poke_u8(KBUF, 0, b & 255)
+	write(T.master, KBUF, 1)
+}
+
+func sendArrow(f) {
+	poke_u8(KBUF, 0, 27)
+	if T.appcur == 1 {
+		poke_u8(KBUF, 1, 79)
+	} else {
+		poke_u8(KBUF, 1, 91)
+	}
+	poke_u8(KBUF, 2, f)
+	write(T.master, KBUF, 3)
+}
+
+func sendDel() {
+	poke_u8(KBUF, 0, 27)
+	poke_u8(KBUF, 1, 91)
+	poke_u8(KBUF, 2, 51)
+	poke_u8(KBUF, 3, 126)
+	write(T.master, KBUF, 4)
+}
+
+func sendCp(c) {
+	if c < 0x80 {
+		poke_u8(KBUF, 0, c)
+		write(T.master, KBUF, 1)
+	} else if c < 0x800 {
+		poke_u8(KBUF, 0, 0xC0|(c>>6))
+		poke_u8(KBUF, 1, 0x80|(c&0x3F))
+		write(T.master, KBUF, 2)
+	} else if c < 0x10000 {
+		poke_u8(KBUF, 0, 0xE0|(c>>12))
+		poke_u8(KBUF, 1, 0x80|((c>>6)&0x3F))
+		poke_u8(KBUF, 2, 0x80|(c&0x3F))
+		write(T.master, KBUF, 3)
+	} else {
+		poke_u8(KBUF, 0, 0xF0|(c>>18))
+		poke_u8(KBUF, 1, 0x80|((c>>12)&0x3F))
+		poke_u8(KBUF, 2, 0x80|((c>>6)&0x3F))
+		poke_u8(KBUF, 3, 0x80|(c&0x3F))
+		write(T.master, KBUF, 4)
+	}
+}
+
+func handleInput() {
+	for {
+		c := GetCharPressed()
+		if c == 0 {
+			break
+		}
+		sendCp(c)
+	}
+	if IsKeyPressed(257) {
+		sendByte(13)
+	}
+	if IsKeyPressed(259) {
+		sendByte(127)
+	}
+	if IsKeyPressed(258) {
+		sendByte(9)
+	}
+	if IsKeyPressed(256) {
+		sendByte(27)
+	}
+	if IsKeyPressed(265) {
+		sendArrow(65)
+	}
+	if IsKeyPressed(264) {
+		sendArrow(66)
+	}
+	if IsKeyPressed(262) {
+		sendArrow(67)
+	}
+	if IsKeyPressed(263) {
+		sendArrow(68)
+	}
+	if IsKeyPressed(261) {
+		sendDel()
+	}
+	ctrl := IsKeyDown(341) || IsKeyDown(345)
+	if ctrl {
+		k := 65
+		for k <= 90 {
+			if IsKeyPressed(k) {
+				sendByte(k - 64)
+			}
+			k = k + 1
+		}
+	}
+}
+
+func colOf(rgb) (col) {
+	col = Color{(rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255, 255}
+}
+
+func drawGrid(font, cwf, chf, cw, ch) {
+	BeginDrawing()
+	ClearBackground(colOf(DEF_BG))
+	r := 0
+	for r < T.rows {
+		c := 0
+		for c < T.cols {
+			i := r * T.cols + c
+			bgv := T.cbg[i]
+			if bgv != DEF_BG {
+				DrawRectangle(c*cw, r*ch, cw, ch, colOf(bgv))
+			}
+			cp := T.ch[i]
+			if cp > 32 {
+				DrawTextCodepoint(font, cp, Vector2{float(c) * cwf, float(r) * chf}, FS, colOf(T.cfg[i]))
+			}
+			c = c + 1
+		}
+		r = r + 1
+	}
+	if T.curvis == 1 {
+		DrawRectangle(T.cx*cw, T.cy*ch+ch-2, cw, 2, colOf(0xd3d7cf))
+	}
+	EndDrawing()
+}
+
+func allocGrids() {
+	tot := T.rows * T.cols
+	T.mch = zeros(tot)
+	T.mcfg = zeros(tot)
+	T.mcbg = zeros(tot)
+	T.ach = zeros(tot)
+	T.acfg = zeros(tot)
+	T.acbg = zeros(tot)
+	i := 0
+	for i < tot {
+		T.mch[i] = 32
+		T.mcfg[i] = DEF_FG
+		T.mcbg[i] = DEF_BG
+		T.ach[i] = 32
+		T.acfg[i] = DEF_FG
+		T.acbg[i] = DEF_BG
+		i = i + 1
+	}
+	if T.alt == 1 {
+		T.ch = T.ach
+		T.cfg = T.acfg
+		T.cbg = T.acbg
+	} else {
+		T.ch = T.mch
+		T.cfg = T.mcfg
+		T.cbg = T.mcbg
+	}
+}
+
+func resizeTo(nc, nr) {
+	T.cols = nc
+	T.rows = nr
+	T.top = 0
+	T.bot = nr - 1
+	if T.cx >= nc {
+		T.cx = nc - 1
+	}
+	if T.cy >= nr {
+		T.cy = nr - 1
+	}
+	allocGrids()
+	poke_u16(WSZ, 0, T.rows)
+	poke_u16(WSZ, 2, T.cols)
+	ioctl(T.master, 21524, WSZ)
+}
+
+func checkResize(cw, ch) {
+	nc := GetScreenWidth() / cw
+	nr := GetScreenHeight() / ch
+	if nc < 1 {
+		nc = 1
+	}
+	if nr < 1 {
+		nr = 1
+	}
+	if nc != T.cols || nr != T.rows {
+		resizeTo(nc, nr)
+	}
+}
+
+func main() {
+	T.cols = 80
+	T.rows = 24
+	T.cx = 0
+	T.cy = 0
+	T.fg = DEF_FG
+	T.bg = DEF_BG
+	T.bold = 0
+	T.rev = 0
+	T.curvis = 1
+	T.appcur = 0
+	T.alt = 0
+	T.top = 0
+	T.bot = 23
+	T.st = 0
+	T.u8need = 0
+	T.u8cp = 0
+	T.priv = 0
+	T.params = []int{}
+	initPalette()
+	allocGrids()
+
+	amaster := alloc(8)
+	ws := alloc(8)
+	poke_u16(ws, 0, T.rows)
+	poke_u16(ws, 2, T.cols)
+	pid := forkpty(amaster, 0, 0, ws)
+	if pid == 0 {
+		setenv("TERM", "xterm-256color", 1)
+		argv := alloc(16)
+		poke_ptr(argv, 0, cstr("bash"))
+		poke_ptr(argv, 8, 0)
+		execvp("bash", argv)
+		_exit(127)
+	}
+	T.master = peek_i32(amaster, 0)
+	T.pid = pid
+	fl := fcntl(T.master, 3, 0)
+	fcntl(T.master, 4, fl|2048)
+	RBUF = alloc(8192)
+	KBUF = alloc(16)
+	WSTAT = alloc(16)
+	WSZ = alloc(8)
+
+	sd := env("MTERM_SEED")
+	if sd != "" {
+		write(T.master, cstr(sd), len(sd))
+	}
+
+	SetConfigFlags(4)
+	InitWindow(800, 480, "machin-terminal")
+	SetTargetFPS(60)
+	cpbuf, cpn := buildCodepoints()
+	font := LoadFontEx("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", int(FS), cpbuf, cpn)
+	mv := MeasureTextEx(font, "M", FS, 0.0)
+	cwf := mv.x
+	chf := FS + 2.0
+	cw := int(cwf)
+	ch := int(chf)
+	if cw < 1 {
+		cw = 1
+	}
+	SetWindowSize(T.cols*cw, T.rows*ch)
+
+	for {
+		if WindowShouldClose() {
+			break
+		}
+		if waitpid(T.pid, WSTAT, 1) == T.pid {
+			break
+		}
+		checkResize(cw, ch)
+		drainPty()
+		handleInput()
+		drawGrid(font, cwf, chf, cw, ch)
+	}
+	CloseWindow()
+}
