@@ -1,8 +1,14 @@
 # machin-terminal
 
-A lightweight Linux terminal emulator written in **pure [MFL](https://github.com/javimosch/machin)** —
-a leaner, single-static-binary alternative to Terminator/GTK+VTE. No GTK, no VTE,
-no Python: just MFL through the C FFI for the PTY, and raylib for pixels.
+A minimal, fast, correct **single-window terminal emulator** written in
+**pure [MFL](https://github.com/javimosch/machin)** (the machin language). One ~1.1 MB
+static binary — no GTK, no VTE, no Python — just MFL through the C FFI for the PTY and
+raylib for pixels. **[tmux](https://github.com/tmux/tmux) is the multiplexer**, so
+there are no native tabs/splits ([why](docs/VISION.md)).
+
+🌐 **[Landing & changelog](https://javimosch.github.io/machin-terminal/)** ·
+📥 **[Releases](https://github.com/javimosch/machin-terminal/releases)** ·
+🧭 **[Vision](docs/VISION.md)** · **[Roadmap](docs/ROADMAP.md)** · **[Agent guide](AGENTS.md)**
 
 ## Status
 
@@ -18,18 +24,22 @@ no Python: just MFL through the C FFI for the PTY, and raylib for pixels.
   SU/SD, insert/delete lines (IL/DL) and chars (ICH/DCH/ECH), save/restore cursor
   (DECSC/DECRC, CSI s/u), reverse video (SGR 7/27), cursor visibility (`?25`),
   application cursor keys (`?1`), and a **resizable window** that recomputes
-  rows/cols and SIGWINCHes the shell via `ioctl(TIOCSWINSZ)`. **Verified running
-  `vim` and `htop`**, with correct alt-screen enter/restore.
+  rows/cols and SIGWINCHes the shell via `ioctl(TIOCSWINSZ)`.
+- **Step 4 — UTF-8 + fonts**: multi-byte UTF-8 output decoding and a wider font atlas
+  (Latin-1, box-drawing, blocks, arrows, Braille) — **tmux pane borders render as
+  solid lines**.
+- **Step 5 — mouse reporting**: X10 + SGR (`?1006`) encoding to the PTY — button
+  press/release, wheel, drag (`?1002`/`?1003`), and shift/alt/ctrl modifiers.
 
-  Optional dev hook: set `MTERM_SEED="cmd\r"` to type a command into the shell at
-  startup (used for headless screenshot testing).
+**Verified running `vim`, `htop`, and `tmux`**, with correct alt-screen enter/restore.
+Optional dev hook: set `MTERM_SEED="cmd\r"` to type a command into the shell at startup
+(used for headless screenshot testing).
 
 ## Roadmap
 
-4. Scrollback history (the main-screen backlog above the viewport).
-5. Tiling / tabs / split panes — the Terminator-parity layer.
-6. Polish: bold/underline/italic attributes, mouse reporting, selection + clipboard,
-   configurable font/colors, true Unicode width (wide/combining glyphs).
+Next up (see [docs/ROADMAP.md](docs/ROADMAP.md)): mouse selection + clipboard, bold/
+underline/italic attributes, native scrollback, configurable font/colors. Native
+tiling/tabs are a **non-goal** — that's tmux's job.
 
 ## Build & run
 
@@ -39,3 +49,9 @@ DISPLAY=:0 ./machin-terminal
 ```
 
 Requires a monospace font at `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`.
+
+## Links
+
+- **[machin](https://github.com/javimosch/machin)** — the MFL language & compiler this is built with
+- **[awesome-machin](https://github.com/javimosch/awesome-machin)** — the curated list of things built with machin
+- Built by **[@javimosch](https://github.com/javimosch)** as a machin dogfood project.
