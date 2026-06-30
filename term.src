@@ -173,6 +173,79 @@ func appendRange(s, lo, hi) (out) {
 	}
 }
 
+func appendStrBytes(arr, s) (out) {
+	out = arr
+	b := bytes(s)
+	m := len(s)
+	i := 0
+	for i < m {
+		out = append(out, byte_at(b, i))
+		i = i + 1
+	}
+}
+
+func appendCSI(arr, params, final) (out) {
+	out = append(arr, 27)
+	out = append(out, 91)
+	out = appendStrBytes(out, params)
+	out = append(out, final)
+}
+
+// Headless VT-parser throughput benchmark (MTERM_BENCH=1). Feeds a representative
+// colored-shell-output stream through the real feed() — including grid writes and
+// scroll — so it measures the actual emulator engine, not a toy loop. No window.
+func runBench() {
+	mode := env("MTERM_BENCH")
+	pat := []int{}
+	if mode == "2" {
+		// parse-bound: cursor-home each iter, no newline -> no scroll
+		pat = appendCSI(pat, "", 72)
+		pat = appendCSI(pat, "1;32", 109)
+		pat = appendStrBytes(pat, "user@host")
+		pat = appendCSI(pat, "0", 109)
+		pat = appendStrBytes(pat, ":")
+		pat = appendCSI(pat, "34", 109)
+		pat = appendStrBytes(pat, "~/work/machin-terminal")
+		pat = appendCSI(pat, "0", 109)
+		pat = appendStrBytes(pat, "$ the quick brown fox 0123456789")
+	} else {
+		// realistic (cat-like): colored prompt line + text + CRLF (scrolls)
+		pat = appendCSI(pat, "1;32", 109)
+		pat = appendStrBytes(pat, "user@host")
+		pat = appendCSI(pat, "0", 109)
+		pat = appendStrBytes(pat, ":")
+		pat = appendCSI(pat, "34", 109)
+		pat = appendStrBytes(pat, "~/work/machin-terminal")
+		pat = appendCSI(pat, "0", 109)
+		pat = appendStrBytes(pat, "$ the quick brown fox jumps over 0123456789 ")
+		pat = append(pat, 13)
+		pat = append(pat, 10)
+	}
+	plen := len(pat)
+
+	target := 50000000
+	t0 := now_ms()
+	fed := 0
+	for fed < target {
+		j := 0
+		for j < plen {
+			feed(pat[j])
+			j = j + 1
+		}
+		fed = fed + plen
+	}
+	t1 := now_ms()
+	ms := t1 - t0
+	if ms < 1 {
+		ms = 1
+	}
+	println("== machin-terminal VT parser throughput ==")
+	println("bytes fed   : ", fed)
+	println("elapsed (ms): ", ms)
+	println("throughput  : ", fed/(ms*1000), " MB/s")
+	println("per byte    : ", (ms*1000000)/fed, " ns/byte")
+}
+
 // Codepoints to bake into the font atlas: ASCII + Latin-1, general punctuation
 // (dashes/quotes/bullets), arrows, box-drawing + block elements + geometric shapes
 // (tmux/TUI borders), and Braille (spinners/btop). Anything else renders as '?'.
@@ -1121,6 +1194,11 @@ func main() {
 	T.params = []int{}
 	initPalette()
 	allocGrids()
+
+	if env("MTERM_BENCH") != "" {
+		runBench()
+		exit(0)
+	}
 
 	amaster := alloc(8)
 	ws := alloc(8)

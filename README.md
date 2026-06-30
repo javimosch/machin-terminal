@@ -8,7 +8,7 @@ there are no native tabs/splits ([why](docs/VISION.md)).
 
 🌐 **[Landing & changelog](https://javimosch.github.io/machin-terminal/)** ·
 📥 **[Releases](https://github.com/javimosch/machin-terminal/releases)** ·
-🧭 **[Vision](docs/VISION.md)** · **[Roadmap](docs/ROADMAP.md)** · **[Agent guide](AGENTS.md)**
+🧭 **[Vision](docs/VISION.md)** · **[Roadmap](docs/ROADMAP.md)** · **[Benchmarks](docs/BENCHMARK.md)** · **[Agent guide](AGENTS.md)**
 
 ## Status
 
