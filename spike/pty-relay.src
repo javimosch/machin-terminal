@@ -1,0 +1,111 @@
+// machin-terminal — step 1 spike: forkpty a real shell and relay its I/O.
+// Proves the hard layer (PTY + fork/exec + raw fd I/O + poll) works in pure MFL
+// via the C FFI, with zero byte-marshaling (read master -> write stdout directly).
+//
+//   build/run:  machin encode spike/pty-relay.src > spike/pty-relay.mfl
+//               machin run spike/pty-relay.mfl
+//
+// Inside the relay you get a working shell-in-a-shell; exit it (Ctrl-D / `exit`)
+// and the relay ends.
+
+extern "pty" {
+	cflags "-lutil"
+	header "pty.h"
+	fn forkpty(ptr, ptr, ptr, ptr) i32
+}
+
+extern "c" {
+	header "unistd.h"
+	fn read(i32, ptr, i32) i32
+	fn write(i32, ptr, i32) i32
+	fn execvp(string, ptr) i32
+	fn _exit(i32)
+}
+
+extern "poll" {
+	header "poll.h"
+	fn poll(ptr, i32, i32) i32
+}
+
+// cstr copies an MFL string into a fresh NUL-terminated C buffer, returns the pointer.
+// (MFL infers param/return types; the named return `p` is the result.)
+func cstr(s) (p) {
+	n := len(s)
+	b := bytes(s)
+	p = alloc(n + 1)
+	i := 0
+	for i < n {
+		poke_u8(p, i, byte_at(b, i))
+		i = i + 1
+	}
+	poke_u8(p, n, 0)
+}
+
+func main() {
+	amaster := alloc(8)
+
+	// struct winsize { u16 ws_row; u16 ws_col; u16 ws_xpixel; u16 ws_ypixel; }
+	ws := alloc(8)
+	poke_u16(ws, 0, 24) // rows
+	poke_u16(ws, 2, 80) // cols
+
+	pid := forkpty(amaster, 0, 0, ws)
+	if pid == 0 {
+		// child: replace ourselves with an interactive shell on the pty slave
+		argv := alloc(16)
+		poke_ptr(argv, 0, cstr("bash"))
+		poke_ptr(argv, 8, 0)
+		execvp("bash", argv)
+		_exit(127)
+	}
+
+	master := peek_i32(amaster, 0)
+	println("[machin-terminal spike] pty master fd =", master, " shell pid =", pid)
+	println("[machin-terminal spike] you are now in a relayed shell — type `exit` to leave")
+
+	raw_mode(1)
+	buf := alloc(65536)
+
+	// two pollfds: [0]=master, [1]=our stdin(0); each is {i32 fd; u16 events; u16 revents}
+	pfds := alloc(16)
+	poke_i32(pfds, 0, master)
+	poke_u16(pfds, 4, 1) // POLLIN
+	poke_i32(pfds, 8, 0)
+	poke_u16(pfds, 12, 1) // POLLIN
+
+	running := true
+	for running {
+		poke_u16(pfds, 6, 0)  // clear master revents
+		poke_u16(pfds, 14, 0) // clear stdin revents
+		r := poll(pfds, 2, -1)
+		if r < 0 {
+			running = false
+		} else {
+			mr := (peek_i32(pfds, 4) >> 16) & 65535  // master revents
+			sr := (peek_i32(pfds, 12) >> 16) & 65535 // stdin revents
+			if (mr & 1) != 0 {
+				n := read(master, buf, 65536)
+				if n <= 0 {
+					running = false
+				} else {
+					write(1, buf, n)
+				}
+			}
+			if running && (sr & 1) != 0 {
+				n := read(0, buf, 65536)
+				if n <= 0 {
+					running = false
+				} else {
+					write(master, buf, n)
+				}
+			}
+			if (mr & 24) != 0 { // POLLERR(8)|POLLHUP(16): shell gone
+				running = false
+			}
+		}
+	}
+
+	raw_mode(0)
+	println("")
+	println("[machin-terminal spike] shell exited — relay done")
+}
