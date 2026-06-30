@@ -31,7 +31,7 @@ DEST="${BINDIR}/machin-terminal"
 # --- download + install -----------------------------------------------------
 say "Downloading ${ASSET} → ${DEST}"
 TMP="$(mktemp)"
-curl -fSL "${URL}" -o "${TMP}"
+curl -fsSL "${URL}" -o "${TMP}"
 chmod +x "${TMP}"
 if [ -w "${BINDIR}" ]; then
 	mv "${TMP}" "${DEST}"
@@ -41,13 +41,15 @@ else
 fi
 
 # --- runtime dependency checks (warnings only) ------------------------------
-have() { ldconfig -p 2>/dev/null | grep -q "$1"; }
+# NB: grep without -q (reads to EOF) so it doesn't SIGPIPE its producer under
+# `set -o pipefail` and report a false failure.
+have() { ldconfig -p 2>/dev/null | grep "$1" >/dev/null 2>&1; }
+fonts="$(fc-list 2>/dev/null || true)"
 have 'libGL\.so'  || warn "libGL not found — install an OpenGL driver (e.g. 'sudo apt install libgl1 mesa-utils')."
 have 'libX11\.so' || warn "libX11 not found — install X11 ('sudo apt install libx11-6'); on Wayland it runs via XWayland."
-if ! fc-list 2>/dev/null | grep -qi mono; then
+printf '%s\n' "$fonts" | grep -i mono >/dev/null 2>&1 || \
 	warn "no monospace font found — 'sudo apt install fonts-dejavu-core'."
-fi
-fc-list 2>/dev/null | grep -qiE 'nerd|powerline|MesloLGS' || \
+printf '%s\n' "$fonts" | grep -iE 'nerd|powerline|MesloLGS' >/dev/null 2>&1 || \
 	say "tip: for Powerlevel10k icons, install a Nerd Font and run with MTERM_FONT=/path/to/NerdFont.ttf"
 
 # --- desktop entry (so it shows in app launchers) ---------------------------
