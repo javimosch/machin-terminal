@@ -31,14 +31,14 @@ through the **real `feed()` parser** (same code the live terminal runs), no wind
 
 | Workload | Throughput | Per byte |
 |---|---:|---:|
-| **Parser core** (SGR + cursor, in-place, no scroll) | **172 MB/s** | **5 ns** |
-| Realistic `cat`-like (colored lines + CRLF, scrolls) | 41 MB/s | 24 ns |
+| **Parser core** (SGR + cursor, in-place, no scroll) | **186 MB/s** | **5 ns** |
+| Realistic `cat`-like (colored lines + CRLF, scrolls) | **144 MB/s** | **6 ns** |
 
-The parser itself runs at ~5 ns/byte. The realistic figure is lower because it is
-dominated by the screen **scroll** — currently an `O(rows × cols)` cell copy per
-newline. A row-pointer ring buffer would make scroll `O(1)` and close most of that gap
-(a tracked optimization). For reference, 41 MB/s is ~one 50 MB `cat` per 1.2 s of
-dense, newline-heavy output.
+The parser runs at ~5 ns/byte, and realistic newline-heavy output now tracks close to
+it. Scrolling is `O(rows)` — it rotates a **row-pointer map** (`rmap`: logical→physical
+row) and clears one row, instead of copying every cell. That took the realistic figure
+from 41 MB/s → **144 MB/s (3.5×)**. For reference, 144 MB/s is one 50 MB `cat` per
+~0.35 s of dense output.
 
 Reproduce:
 
@@ -68,7 +68,7 @@ but that's not the current design.)
 - ✅ **Fast native VT parser** — ~5 ns/byte core; competitive engine for a hand-written
   emulator in a young language.
 - ➖ **RAM is comparable**, not lower — the OpenGL driver dominates (see §3).
-- 🔜 **Scroll is the next perf win** — `O(1)` row-pointer ring buffer.
+- ✅ **Scroll is `O(rows)`** — row-pointer rotation, not a cell copy (3.5× on cat-like).
 
 Methodology is intentionally simple and reproducible; numbers will move as the
 implementation and hardware change. Re-run the parser benchmark with the `MTERM_BENCH`

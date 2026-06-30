@@ -86,6 +86,9 @@ type Term struct {
 	ach []int
 	acfg []int
 	acbg []int
+	rmap []int
+	mrmap []int
+	armap []int
 	st int
 	u8need int
 	u8cp int
@@ -246,6 +249,52 @@ func runBench() {
 	println("per byte    : ", (ms*1000000)/fed, " ns/byte")
 }
 
+// Headless correctness check (MTERM_VERIFY=1): feed numbered lines 1..N through the
+// real parser, then dump the LOGICAL grid (via rowbase) so scroll ordering can be
+// verified without a window. Correct output shows consecutive numbers, in order.
+func dumpGrid() {
+	buf := alloc(T.cols + 1)
+	r := 0
+	for r < T.rows {
+		base := rowbase(r)
+		c := 0
+		last := -1
+		for c < T.cols {
+			cp := T.ch[base+c]
+			v := cp
+			if v < 32 || v > 126 {
+				v = 32
+			}
+			poke_u8(buf, c, v)
+			if cp != 32 {
+				last = c
+			}
+			c = c + 1
+		}
+		poke_u8(buf, last+1, 0)
+		println("row ", r, ": ", ptr_str(buf))
+		r = r + 1
+	}
+}
+
+func runVerify() {
+	i := 1
+	for i <= 60 {
+		s := str(i)
+		b := bytes(s)
+		m := len(s)
+		j := 0
+		for j < m {
+			feed(byte_at(b, j))
+			j = j + 1
+		}
+		feed(13)
+		feed(10)
+		i = i + 1
+	}
+	dumpGrid()
+}
+
 // Codepoints to bake into the font atlas: ASCII + Latin-1, general punctuation
 // (dashes/quotes/bullets), arrows, box-drawing + block elements + geometric shapes
 // (tmux/TUI borders), and Braille (spinners/btop). Anything else renders as '?'.
@@ -296,6 +345,29 @@ func xterm256(n) (rgb) {
 	}
 }
 
+// Row indirection: logical row r lives at physical base rowbase(r). Scrolling rotates
+// T.rmap (O(rows)) instead of copying every cell (O(rows*cols)).
+func rowbase(r) (b) {
+	b = T.rmap[r] * T.cols
+}
+
+func identityRows() (m) {
+	m = []int{}
+	r := 0
+	for r < T.rows {
+		m = append(m, r)
+		r = r + 1
+	}
+}
+
+func resetActiveRmap() {
+	r := 0
+	for r < T.rows {
+		T.rmap[r] = r
+		r = r + 1
+	}
+}
+
 func blankCell(i) {
 	T.ch[i] = 32
 	T.cfg[i] = T.fg
@@ -303,7 +375,7 @@ func blankCell(i) {
 }
 
 func clearRow(r) {
-	base := r * T.cols
+	base := rowbase(r)
 	c := 0
 	for c < T.cols {
 		blankCell(base + c)
@@ -321,8 +393,8 @@ func clearAll() {
 }
 
 func copyRow(src, dst) {
-	s := src * T.cols
-	d := dst * T.cols
+	s := rowbase(src)
+	d := rowbase(dst)
 	c := 0
 	for c < T.cols {
 		T.ch[d+c] = T.ch[s+c]
@@ -332,29 +404,71 @@ func copyRow(src, dst) {
 	}
 }
 
+func eraseLineFrom(row, s, e) {
+	base := rowbase(row)
+	c := s
+	for c < e {
+		blankCell(base + c)
+		c = c + 1
+	}
+}
+
 func scrollRegionUp(n) {
-	k := 0
-	for k < n {
+	h := T.bot - T.top + 1
+	if n >= h {
 		r := T.top
-		for r < T.bot {
-			copyRow(r+1, r)
+		for r <= T.bot {
+			clearRow(r)
 			r = r + 1
 		}
-		clearRow(T.bot)
-		k = k + 1
+		return
+	}
+	// rotate the region's row pointers up by n; recycle the top n rows to the bottom
+	tmp := []int{}
+	i := 0
+	for i < n {
+		tmp = append(tmp, T.rmap[T.top+i])
+		i = i + 1
+	}
+	r := T.top
+	for r <= T.bot-n {
+		T.rmap[r] = T.rmap[r+n]
+		r = r + 1
+	}
+	i = 0
+	for i < n {
+		T.rmap[T.bot-n+1+i] = tmp[i]
+		clearRow(T.bot - n + 1 + i)
+		i = i + 1
 	}
 }
 
 func scrollRegionDown(n) {
-	k := 0
-	for k < n {
-		r := T.bot
-		for r > T.top {
-			copyRow(r-1, r)
-			r = r - 1
+	h := T.bot - T.top + 1
+	if n >= h {
+		r := T.top
+		for r <= T.bot {
+			clearRow(r)
+			r = r + 1
 		}
-		clearRow(T.top)
-		k = k + 1
+		return
+	}
+	tmp := []int{}
+	i := 0
+	for i < n {
+		tmp = append(tmp, T.rmap[T.bot-n+1+i])
+		i = i + 1
+	}
+	r := T.bot
+	for r >= T.top+n {
+		T.rmap[r] = T.rmap[r-n]
+		r = r - 1
+	}
+	i = 0
+	for i < n {
+		T.rmap[T.top+i] = tmp[i]
+		clearRow(T.top + i)
+		i = i + 1
 	}
 }
 
@@ -391,7 +505,7 @@ func deleteLines(n) {
 }
 
 func insertChars(n) {
-	base := T.cy * T.cols
+	base := rowbase(T.cy)
 	c := T.cols - 1
 	for c >= T.cx+n {
 		T.ch[base+c] = T.ch[base+c-n]
@@ -411,7 +525,7 @@ func insertChars(n) {
 }
 
 func deleteChars(n) {
-	base := T.cy * T.cols
+	base := rowbase(T.cy)
 	c := T.cx
 	for c < T.cols {
 		if c+n < T.cols {
@@ -426,7 +540,7 @@ func deleteChars(n) {
 }
 
 func eraseChars(n) {
-	base := T.cy * T.cols
+	base := rowbase(T.cy)
 	lim := T.cx + n
 	if lim > T.cols {
 		lim = T.cols
@@ -461,7 +575,7 @@ func putc(cp) {
 		fg = T.bg
 		bg = T.fg
 	}
-	i := T.cy * T.cols + T.cx
+	i := rowbase(T.cy) + T.cx
 	T.ch[i] = cp
 	T.cfg[i] = fg
 	T.cbg[i] = bg
@@ -480,34 +594,36 @@ func tab() {
 }
 
 func eraseDisp(mode) {
-	tot := T.rows * T.cols
-	s := 0
-	e := tot
 	if mode == 0 {
-		s = T.cy * T.cols + T.cx
+		eraseLineFrom(T.cy, T.cx, T.cols)
+		r := T.cy + 1
+		for r < T.rows {
+			clearRow(r)
+			r = r + 1
+		}
 	} else if mode == 1 {
-		e = T.cy * T.cols + T.cx + 1
-	}
-	i := s
-	for i < e {
-		blankCell(i)
-		i = i + 1
+		r := 0
+		for r < T.cy {
+			clearRow(r)
+			r = r + 1
+		}
+		eraseLineFrom(T.cy, 0, T.cx+1)
+	} else {
+		r := 0
+		for r < T.rows {
+			clearRow(r)
+			r = r + 1
+		}
 	}
 }
 
 func eraseLine(mode) {
-	base := T.cy * T.cols
-	s := 0
-	e := T.cols
-	if mode == 0 {
-		s = T.cx
-	} else if mode == 1 {
-		e = T.cx + 1
-	}
-	c := s
-	for c < e {
-		blankCell(base + c)
-		c = c + 1
+	if mode == 1 {
+		eraseLineFrom(T.cy, 0, T.cx+1)
+	} else if mode == 2 {
+		eraseLineFrom(T.cy, 0, T.cols)
+	} else {
+		eraseLineFrom(T.cy, T.cx, T.cols)
 	}
 }
 
@@ -600,6 +716,7 @@ func altSwitch(on) {
 		T.ch = T.ach
 		T.cfg = T.acfg
 		T.cbg = T.acbg
+		T.rmap = T.armap
 	} else {
 		if T.alt == 0 {
 			return
@@ -608,6 +725,7 @@ func altSwitch(on) {
 		T.ch = T.mch
 		T.cfg = T.mcfg
 		T.cbg = T.mcbg
+		T.rmap = T.mrmap
 	}
 }
 
@@ -653,6 +771,7 @@ func privMode(b) {
 	} else if p == 47 || p == 1047 {
 		if set {
 			altSwitch(true)
+			resetActiveRmap()
 			clearAll()
 			T.cx = 0
 			T.cy = 0
@@ -669,6 +788,7 @@ func privMode(b) {
 		if set {
 			saveCursor()
 			altSwitch(true)
+			resetActiveRmap()
 			clearAll()
 			T.cx = 0
 			T.cy = 0
@@ -1088,9 +1208,10 @@ func drawGrid(font, cwf, chf, cw, ch) {
 	ClearBackground(colOf(DEF_BG))
 	r := 0
 	for r < T.rows {
+		rb := rowbase(r)
 		c := 0
 		for c < T.cols {
-			i := r * T.cols + c
+			i := rb + c
 			bgv := T.cbg[i]
 			if bgv != DEF_BG {
 				DrawRectangle(c*cw, r*ch, cw, ch, colOf(bgv))
@@ -1127,14 +1248,18 @@ func allocGrids() {
 		T.acbg[i] = DEF_BG
 		i = i + 1
 	}
+	T.mrmap = identityRows()
+	T.armap = identityRows()
 	if T.alt == 1 {
 		T.ch = T.ach
 		T.cfg = T.acfg
 		T.cbg = T.acbg
+		T.rmap = T.armap
 	} else {
 		T.ch = T.mch
 		T.cfg = T.mcfg
 		T.cbg = T.mcbg
+		T.rmap = T.mrmap
 	}
 }
 
@@ -1197,6 +1322,10 @@ func main() {
 
 	if env("MTERM_BENCH") != "" {
 		runBench()
+		exit(0)
+	}
+	if env("MTERM_VERIFY") != "" {
+		runVerify()
 		exit(0)
 	}
 
