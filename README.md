@@ -10,6 +10,20 @@ there are no native tabs/splits ([why](docs/VISION.md)).
 📥 **[Releases](https://github.com/javimosch/machin-terminal/releases)** ·
 🧭 **[Vision](docs/VISION.md)** · **[Roadmap](docs/ROADMAP.md)** · **[Benchmarks](docs/BENCHMARK.md)** · **[Agent guide](AGENTS.md)**
 
+## Install
+
+Linux x86_64 (needs an X11 display + OpenGL — works on Ubuntu/GNOME, and on Wayland via XWayland):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/javimosch/machin-terminal/master/install.sh | bash
+machin-terminal --version
+```
+
+The script downloads the latest release binary to `~/.local/bin` (or `/usr/local/bin`),
+checks runtime deps, and adds a desktop entry. Or grab the binary yourself from
+[Releases](https://github.com/javimosch/machin-terminal/releases). Verify any build
+headlessly with `machin-terminal --version` / `--help` (no window).
+
 ## Status
 
 - **Step 1 — PTY core** (`spike/pty-relay.src`): `forkpty` a real bash and relay its

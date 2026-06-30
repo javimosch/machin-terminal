@@ -117,6 +117,7 @@ type Term struct {
 	pid int
 }
 
+var VERSION = "0.2.0"
 var T = Term{}
 var FS = 20.0
 var DEF_FG = 0xd3d7cf
@@ -1656,7 +1657,38 @@ func checkResize(cw, ch) {
 	}
 }
 
+func printHelp() {
+	println("machin-terminal ", VERSION, " — a terminal emulator in pure MFL")
+	println("")
+	println("usage: machin-terminal [--version] [--help]")
+	println("")
+	println("It opens a window and runs your $SHELL (falls back to /bin/bash).")
+	println("Use it with tmux (multiplexing) and zsh + Oh My Zsh / Powerlevel10k (prompt/theme).")
+	println("")
+	println("environment:")
+	println("  MTERM_FONT        path to a .ttf (default DejaVu Sans Mono; use a Nerd Font for p10k)")
+	println("  MTERM_FONT_SIZE   font size in px (default 20)")
+	println("  SHELL             the shell to launch")
+	println("")
+	println("palette/theme: set it from your shell via OSC 4/10/11 (e.g. base16-shell).")
+	println("docs: https://github.com/javimosch/machin-terminal")
+}
+
 func main() {
+	a := args()
+	i := 0
+	for i < len(a) {
+		if a[i] == "--version" || a[i] == "-v" {
+			println("machin-terminal ", VERSION)
+			exit(0)
+		}
+		if a[i] == "--help" || a[i] == "-h" {
+			printHelp()
+			exit(0)
+		}
+		i = i + 1
+	}
+
 	T.cols = 80
 	T.rows = 24
 	T.cx = 0
@@ -1704,13 +1736,17 @@ func main() {
 	ws := alloc(8)
 	poke_u16(ws, 0, T.rows)
 	poke_u16(ws, 2, T.cols)
+	shellPath := env("SHELL")
+	if shellPath == "" {
+		shellPath = "/bin/bash"
+	}
 	pid := forkpty(amaster, 0, 0, ws)
 	if pid == 0 {
 		setenv("TERM", "xterm-256color", 1)
 		argv := alloc(16)
-		poke_ptr(argv, 0, cstr("bash"))
+		poke_ptr(argv, 0, cstr(shellPath))
 		poke_ptr(argv, 8, 0)
-		execvp("bash", argv)
+		execvp(shellPath, argv)
 		_exit(127)
 	}
 	T.master = peek_i32(amaster, 0)
