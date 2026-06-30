@@ -101,6 +101,8 @@ type Term struct {
 	st int
 	u8need int
 	u8cp int
+	oscbuf int
+	osclen int
 	params []int
 	cur int
 	has int
@@ -312,6 +314,30 @@ func runVerify() {
 	soff := selToBuf(sbuf)
 	poke_u8(sbuf, soff, 0)
 	println("SELECTION rows0-2 (last@col1) -> ", ptr_str(sbuf))
+
+	// OSC palette/default-color parsing
+	feed(27)
+	feedStr("]4;1;#ff8800")
+	feed(7)
+	feed(27)
+	feedStr("]11;rgb:1a2b/3c4d/5e6f")
+	feed(7)
+	feed(27)
+	feedStr("]10;#aabbcc")
+	feed(7)
+	println("OSC4  PAL[1] -> ", PAL[1], " want ", 0xff8800)
+	println("OSC11 DEF_BG -> ", DEF_BG, " want ", 0x1a3c5e)
+	println("OSC10 DEF_FG -> ", DEF_FG, " want ", 0xaabbcc)
+}
+
+func feedStr(s) {
+	b := bytes(s)
+	m := len(s)
+	i := 0
+	for i < m {
+		feed(byte_at(b, i))
+		i = i + 1
+	}
 }
 
 // Codepoints to bake into the font atlas: ASCII + Latin-1, general punctuation
@@ -324,6 +350,7 @@ func buildCodepoints() (buf, count) {
 	cps = appendRange(cps, 0x2190, 0x21FF)
 	cps = appendRange(cps, 0x2500, 0x25FF)
 	cps = appendRange(cps, 0x2800, 0x28FF)
+	cps = appendRange(cps, 0xE000, 0xE0FF)
 	count = len(cps)
 	buf = alloc(count * 4)
 	i := 0
@@ -384,6 +411,135 @@ func resetActiveRmap() {
 	for r < T.rows {
 		T.rmap[r] = r
 		r = r + 1
+	}
+}
+
+func hexNibble(ch) (v) {
+	if ch >= 48 && ch <= 57 {
+		v = ch - 48
+	} else if ch >= 97 && ch <= 102 {
+		v = ch - 87
+	} else if ch >= 65 && ch <= 70 {
+		v = ch - 55
+	} else {
+		v = -1
+	}
+}
+
+func parseHexN(b, start, n) (v) {
+	v = 0
+	i := 0
+	for i < n {
+		d := hexNibble(byte_at(b, start+i))
+		if d < 0 {
+			v = -1
+			return
+		}
+		v = v*16 + d
+		i = i + 1
+	}
+}
+
+// Read one hex channel from bytes b at start, up to '/' or end; scale to 8-bit.
+func readChannel(b, start, m) (val, nxt) {
+	v := 0
+	cnt := 0
+	i := start
+	for i < m {
+		ch := byte_at(b, i)
+		if ch == 47 {
+			break
+		}
+		d := hexNibble(ch)
+		if d < 0 {
+			val = -1
+			nxt = m
+			return
+		}
+		v = v*16 + d
+		cnt = cnt + 1
+		i = i + 1
+	}
+	if cnt == 2 {
+		val = v
+	} else if cnt == 4 {
+		val = v >> 8
+	} else if cnt == 1 {
+		val = v * 17
+	} else if cnt == 3 {
+		val = v >> 4
+	} else {
+		val = v & 255
+	}
+	nxt = i + 1
+}
+
+// Parse an X11 color spec ("#RRGGBB", "#RGB", "rgb:RR/GG/BB", "rgb:RRRR/GGGG/BBBB")
+// into a 0xRRGGBB int, or -1 if unrecognized (e.g. a "?" query).
+func parseColorSpec(spec) (rgb) {
+	rgb = -1
+	m := len(spec)
+	if m == 0 {
+		return
+	}
+	b := bytes(spec)
+	c0 := byte_at(b, 0)
+	if c0 == 35 {
+		if m == 7 {
+			r := parseHexN(b, 1, 2)
+			g := parseHexN(b, 3, 2)
+			bl := parseHexN(b, 5, 2)
+			if r >= 0 && g >= 0 && bl >= 0 {
+				rgb = (r << 16) | (g << 8) | bl
+			}
+		} else if m == 4 {
+			r := parseHexN(b, 1, 1)
+			g := parseHexN(b, 2, 1)
+			bl := parseHexN(b, 3, 1)
+			if r >= 0 && g >= 0 && bl >= 0 {
+				rgb = ((r * 17) << 16) | ((g * 17) << 8) | (bl * 17)
+			}
+		}
+	} else if m >= 5 && c0 == 114 && byte_at(b, 1) == 103 && byte_at(b, 2) == 98 && byte_at(b, 3) == 58 {
+		r, p := readChannel(b, 4, m)
+		g, p2 := readChannel(b, p, m)
+		bl, p3 := readChannel(b, p2, m)
+		if r >= 0 && g >= 0 && bl >= 0 && p3 >= 0 {
+			rgb = (r << 16) | (g << 8) | bl
+		}
+	}
+}
+
+// OSC handler: 4;idx;spec (palette), 10;spec (default fg), 11;spec (default bg).
+// This is how shell-side theme scripts (base16-shell, omz) set the terminal palette.
+func oscDispatch() {
+	poke_u8(T.oscbuf, T.osclen, 0)
+	s := ptr_str(T.oscbuf)
+	parts := split(s, ";")
+	if len(parts) < 2 {
+		return
+	}
+	ps := parts[0]
+	if ps == "4" {
+		i := 1
+		for i+1 < len(parts) {
+			idx := parse_int(parts[i])
+			rgb := parseColorSpec(parts[i+1])
+			if rgb >= 0 && idx >= 0 && idx < 16 {
+				PAL[idx] = rgb
+			}
+			i = i + 2
+		}
+	} else if ps == "10" {
+		rgb := parseColorSpec(parts[1])
+		if rgb >= 0 {
+			DEF_FG = rgb
+		}
+	} else if ps == "11" {
+		rgb := parseColorSpec(parts[1])
+		if rgb >= 0 {
+			DEF_BG = rgb
+		}
 	}
 }
 
@@ -948,6 +1104,7 @@ func feed(b) {
 			T.priv = 0
 		} else if b == 93 {
 			T.st = 3
+			T.osclen = 0
 		} else if b == 40 || b == 41 {
 			T.st = 4
 		} else if b == 55 {
@@ -986,13 +1143,18 @@ func feed(b) {
 		}
 	} else if T.st == 3 {
 		if b == 7 {
+			oscDispatch()
 			T.st = 0
 		} else if b == 27 {
 			T.st = 5
+		} else if T.osclen < 4095 {
+			poke_u8(T.oscbuf, T.osclen, b)
+			T.osclen = T.osclen + 1
 		}
 	} else if T.st == 4 {
 		T.st = 0
 	} else if T.st == 5 {
+		oscDispatch()
 		T.st = 0
 	}
 }
@@ -1520,6 +1682,12 @@ func main() {
 	T.u8cp = 0
 	T.priv = 0
 	T.params = []int{}
+	T.osclen = 0
+	T.oscbuf = alloc(4096)
+	fsz := env("MTERM_FONT_SIZE")
+	if fsz != "" {
+		FS = parse_float(fsz)
+	}
 	initPalette()
 	allocGrids()
 
@@ -1563,7 +1731,11 @@ func main() {
 	InitWindow(800, 480, "machin-terminal")
 	SetTargetFPS(60)
 	cpbuf, cpn := buildCodepoints()
-	font := LoadFontEx("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", int(FS), cpbuf, cpn)
+	fontPath := env("MTERM_FONT")
+	if fontPath == "" {
+		fontPath = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+	}
+	font := LoadFontEx(fontPath, int(FS), cpbuf, cpn)
 	mv := MeasureTextEx(font, "M", FS, 0.0)
 	cwf := mv.x
 	chf := FS + 2.0
