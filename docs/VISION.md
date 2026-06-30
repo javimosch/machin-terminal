@@ -1,0 +1,70 @@
+# machin-terminal — Vision
+
+## North star
+
+**A minimal, fast, correct single-window terminal emulator written in pure
+[MFL](https://github.com/javimosch/machin) — one static native binary, no GTK,
+no VTE, no Node, no interpreter.**
+
+machin-terminal is to terminals what `st`/`foot`/early-`alacritty` are: *one fast,
+correct pane of glass*. It draws a character grid, speaks the xterm escape-sequence
+protocol faithfully, talks to a PTY, and gets out of the way. It is **not** a
+window manager, a multiplexer, or a session manager.
+
+> Do one thing well: be the best possible *host* for a shell and for full-screen
+> terminal programs. Delegate everything above the glass.
+
+## Why this, and why machin
+
+machin-terminal is a **dogfood** of the machin language (the project's broader north
+star: *the POC is done — now build real tools and let real usage drive the
+language's features*). A terminal emulator is an unusually good forcing function:
+
+- The **VT escape-sequence parser** is a meaty state machine — the same kind of
+  systems code as the machin self-host lexer/parser.
+- The **PTY + raw fd + ioctl** layer exercises the C FFI hard (`forkpty`, `poll`/
+  non-blocking I/O, `ioctl(TIOCSWINSZ)`, `setenv`).
+- The **renderer** drives the raylib FFI (glyph grid, input, resize).
+- It is genuinely *useful* and genuinely *lightweight* — a ~1 MB static binary vs.
+  Python + GTK + VTE.
+
+Every gap it hits (UTF-8 decoding, font atlas coverage, mouse reporting) is a
+concrete, real-world feature request for the language and its libraries.
+
+## The tmux thesis (why there is no native tiling)
+
+Terminator bundles splits/tabs/sessions *into the emulator* because GTK/VTE gives it
+no other layer. We have a better layer: **tmux**. tmux already does splits, tabs,
+sessions, detach/reattach, layouts, and scripting — better than we would reasonably
+reimplement — and it runs *inside any correct terminal*.
+
+machin-terminal already hosts full-screen ncurses apps (`vim`, `htop`) and runs tmux
+(panes, splits, and status bar render; remaining glitches are glyph-fidelity bugs,
+not multiplexing bugs). So **native tiling would be a worse, non-persistent copy of
+something the user already runs.** We don't build it.
+
+This sharpens the mission: instead of "a lightweight Terminator" (emulator **+**
+multiplexer), machin-terminal is **"a minimal correct terminal; tmux is the
+multiplexer."** The headline acceptance test becomes: *does tmux run flawlessly
+inside it?*
+
+## What "done enough to daily-drive" means
+
+- Runs a login shell, `vim`, `htop`, `less`, `git`, and **tmux** with no visible
+  rendering artifacts.
+- Correct colors (16 / 256 / truecolor), text attributes, Unicode glyphs (incl.
+  box-drawing and common symbols), and cursor behavior.
+- Mouse works (reporting passthrough) and you can select + copy text.
+- Resizes cleanly (SIGWINCH) and starts fast.
+
+## Non-goals (by design)
+
+- **Native tiling / tabs / splits / sessions** — use tmux.
+- A config language, plugin system, or scripting runtime — keep it small.
+- Being a multiplexer or a window manager.
+
+## Maybe-someday (only if real usage demands it)
+
+GPU-accelerated rendering, font ligatures, the kitty/sixel image protocols,
+ANSI-art-grade compatibility. None are on the critical path; the bar is "what does
+daily use actually require."
