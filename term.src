@@ -43,6 +43,7 @@ extern "raylib" {
 	fn DrawTextCodepoint(Font, i32, Vector2, f32, Color)
 	fn GetCharPressed() i32
 	fn IsKeyPressed(i32) bool
+	fn IsKeyPressedRepeat(i32) bool
 	fn IsKeyDown(i32) bool
 	fn GetMouseX() i32
 	fn GetMouseY() i32
@@ -66,6 +67,7 @@ type Term struct {
 	rows int
 	cx int
 	cy int
+	wrapnext int
 	fg int
 	bg int
 	bold int
@@ -117,7 +119,7 @@ type Term struct {
 	pid int
 }
 
-var VERSION = "0.2.0"
+var VERSION = "0.2.1"
 var T = Term{}
 var FS = 20.0
 var DEF_FG = 0xd3d7cf
@@ -329,6 +331,20 @@ func runVerify() {
 	println("OSC4  PAL[1] -> ", PAL[1], " want ", 0xff8800)
 	println("OSC11 DEF_BG -> ", DEF_BG, " want ", 0x1a3c5e)
 	println("OSC10 DEF_FG -> ", DEF_FG, " want ", 0xaabbcc)
+
+	// deferred-wrap: a full row of glyphs parks the cursor (no scroll yet)
+	feed(27)
+	feedStr("[2J")
+	feed(27)
+	feedStr("[H")
+	wi := 0
+	for wi < T.cols {
+		feed(88)
+		wi = wi + 1
+	}
+	println("WRAP after ", T.cols, " glyphs: cy=", T.cy, " cx=", T.cx, " wrapnext=", T.wrapnext, " (want cy=0 wrapnext=1)")
+	feed(90)
+	println("WRAP after next glyph: cy=", T.cy, " cx=", T.cx, " (want cy=1 cx=1)")
 }
 
 func feedStr(s) {
@@ -729,6 +745,7 @@ func eraseChars(n) {
 }
 
 func lf() {
+	T.wrapnext = 0
 	if T.cy == T.bot {
 		scrollRegionUp(1)
 	} else if T.cy < T.rows-1 {
@@ -737,6 +754,7 @@ func lf() {
 }
 
 func ri() {
+	T.wrapnext = 0
 	if T.cy == T.top {
 		scrollRegionDown(1)
 	} else if T.cy > 0 {
@@ -745,6 +763,15 @@ func ri() {
 }
 
 func putc(cp) {
+	// Deferred autowrap: a glyph in the last column leaves the cursor parked there
+	// with wrapnext set; the wrap happens only when the NEXT glyph arrives. This
+	// matches xterm and is what keeps full-screen TUIs (Ink, readline) from corrupting
+	// as text reaches the right edge.
+	if T.wrapnext == 1 {
+		T.cx = 0
+		lf()
+		T.wrapnext = 0
+	}
 	fg := T.fg
 	bg := T.bg
 	if T.rev == 1 {
@@ -755,14 +782,15 @@ func putc(cp) {
 	T.ch[i] = cp
 	T.cfg[i] = fg
 	T.cbg[i] = bg
-	T.cx = T.cx + 1
-	if T.cx >= T.cols {
-		T.cx = 0
-		lf()
+	if T.cx == T.cols-1 {
+		T.wrapnext = 1
+	} else {
+		T.cx = T.cx + 1
 	}
 }
 
 func tab() {
+	T.wrapnext = 0
 	T.cx = ((T.cx / 8) + 1) * 8
 	if T.cx >= T.cols {
 		T.cx = T.cols - 1
@@ -987,6 +1015,9 @@ func csiDispatch(b) {
 		return
 	}
 	p0 := pn(0, 0)
+	if b != 109 {
+		T.wrapnext = 0
+	}
 	if b == 109 {
 		sgr()
 	} else if b == 72 || b == 102 {
@@ -1049,6 +1080,38 @@ func csiDispatch(b) {
 		saveCursor()
 	} else if b == 117 {
 		restoreCursor()
+	} else if b == 110 {
+		// DSR: 6n -> cursor position report; 5n -> device OK
+		if p0 == 6 {
+			o := 0
+			poke_u8(KBUF, o, 27)
+			o = o + 1
+			poke_u8(KBUF, o, 91)
+			o = o + 1
+			o = pokeNum(o, T.cy+1)
+			poke_u8(KBUF, o, 59)
+			o = o + 1
+			o = pokeNum(o, T.cx+1)
+			poke_u8(KBUF, o, 82)
+			o = o + 1
+			write(T.master, KBUF, o)
+		} else if p0 == 5 {
+			poke_u8(KBUF, 0, 27)
+			poke_u8(KBUF, 1, 91)
+			poke_u8(KBUF, 2, 48)
+			poke_u8(KBUF, 3, 110)
+			write(T.master, KBUF, 4)
+		}
+	} else if b == 99 {
+		// Primary Device Attributes -> identify as VT100 with Advanced Video Option
+		poke_u8(KBUF, 0, 27)
+		poke_u8(KBUF, 1, 91)
+		poke_u8(KBUF, 2, 63)
+		poke_u8(KBUF, 3, 49)
+		poke_u8(KBUF, 4, 59)
+		poke_u8(KBUF, 5, 50)
+		poke_u8(KBUF, 6, 99)
+		write(T.master, KBUF, 7)
 	}
 }
 
@@ -1081,9 +1144,11 @@ func feed(b) {
 			lf()
 		} else if b == 13 {
 			T.u8need = 0
+			T.wrapnext = 0
 			T.cx = 0
 		} else if b == 8 {
 			T.u8need = 0
+			T.wrapnext = 0
 			if T.cx > 0 {
 				T.cx = T.cx - 1
 			}
@@ -1184,23 +1249,77 @@ func sendByte(b) {
 	write(T.master, KBUF, 1)
 }
 
-func sendArrow(f) {
-	poke_u8(KBUF, 0, 27)
-	if T.appcur == 1 {
-		poke_u8(KBUF, 1, 79)
-	} else {
-		poke_u8(KBUF, 1, 91)
+// xterm key modifier param: 0 = none, else 1 + (shift=1, alt=2, ctrl=4).
+func keyMod() (m) {
+	bits := 0
+	if IsKeyDown(340) || IsKeyDown(344) {
+		bits = bits + 1
 	}
-	poke_u8(KBUF, 2, f)
-	write(T.master, KBUF, 3)
+	if IsKeyDown(342) || IsKeyDown(346) {
+		bits = bits + 2
+	}
+	if IsKeyDown(341) || IsKeyDown(345) {
+		bits = bits + 4
+	}
+	if bits == 0 {
+		m = 0
+	} else {
+		m = bits + 1
+	}
 }
 
-func sendDel() {
-	poke_u8(KBUF, 0, 27)
-	poke_u8(KBUF, 1, 91)
-	poke_u8(KBUF, 2, 51)
-	poke_u8(KBUF, 3, 126)
-	write(T.master, KBUF, 4)
+// Arrow / Home / End: ESC[<final> (or ESC O <final> in app-cursor mode), or the
+// modified form ESC[1;<mod><final> (e.g. Ctrl+Right = ESC[1;5C for word motion).
+func sendArrow(f) {
+	m := keyMod()
+	if m == 0 {
+		poke_u8(KBUF, 0, 27)
+		if T.appcur == 1 {
+			poke_u8(KBUF, 1, 79)
+		} else {
+			poke_u8(KBUF, 1, 91)
+		}
+		poke_u8(KBUF, 2, f)
+		write(T.master, KBUF, 3)
+	} else {
+		o := 0
+		poke_u8(KBUF, o, 27)
+		o = o + 1
+		poke_u8(KBUF, o, 91)
+		o = o + 1
+		poke_u8(KBUF, o, 49)
+		o = o + 1
+		poke_u8(KBUF, o, 59)
+		o = o + 1
+		o = pokeNum(o, m)
+		poke_u8(KBUF, o, f)
+		o = o + 1
+		write(T.master, KBUF, o)
+	}
+}
+
+// Editing/nav keys encoded as ESC[<num>~ (Delete=3, Insert=2, PgUp=5, PgDn=6),
+// with the modified form ESC[<num>;<mod>~.
+func sendTilde(num) {
+	m := keyMod()
+	o := 0
+	poke_u8(KBUF, o, 27)
+	o = o + 1
+	poke_u8(KBUF, o, 91)
+	o = o + 1
+	o = pokeNum(o, num)
+	if m != 0 {
+		poke_u8(KBUF, o, 59)
+		o = o + 1
+		o = pokeNum(o, m)
+	}
+	poke_u8(KBUF, o, 126)
+	o = o + 1
+	write(T.master, KBUF, o)
+}
+
+func kp(k) (yes) {
+	yes = IsKeyPressed(k) || IsKeyPressedRepeat(k)
 }
 
 func sendCp(c) {
@@ -1512,32 +1631,47 @@ func handleInput() {
 		}
 		sendCp(c)
 	}
-	if IsKeyPressed(257) {
+	if kp(257) {
 		sendByte(13)
 	}
-	if IsKeyPressed(259) {
+	if kp(259) {
 		sendByte(127)
 	}
-	if IsKeyPressed(258) {
+	if kp(258) {
 		sendByte(9)
 	}
 	if IsKeyPressed(256) {
 		sendByte(27)
 	}
-	if IsKeyPressed(265) {
+	if kp(265) {
 		sendArrow(65)
 	}
-	if IsKeyPressed(264) {
+	if kp(264) {
 		sendArrow(66)
 	}
-	if IsKeyPressed(262) {
+	if kp(262) {
 		sendArrow(67)
 	}
-	if IsKeyPressed(263) {
+	if kp(263) {
 		sendArrow(68)
 	}
-	if IsKeyPressed(261) {
-		sendDel()
+	if kp(261) {
+		sendTilde(3)
+	}
+	if kp(260) {
+		sendTilde(2)
+	}
+	if kp(268) {
+		sendArrow(72)
+	}
+	if kp(269) {
+		sendArrow(70)
+	}
+	if kp(266) {
+		sendTilde(5)
+	}
+	if kp(267) {
+		sendTilde(6)
 	}
 	ctrl := IsKeyDown(341) || IsKeyDown(345)
 	shift := IsKeyDown(340) || IsKeyDown(344)
@@ -1693,6 +1827,7 @@ func main() {
 	T.rows = 24
 	T.cx = 0
 	T.cy = 0
+	T.wrapnext = 0
 	T.fg = DEF_FG
 	T.bg = DEF_BG
 	T.bold = 0
