@@ -24,18 +24,22 @@ a shell, full-screen TUIs, and **tmux**. Multiplexing is tmux's job (see VISION)
   press/release, wheel, drag (button-event 1002 / any-event 1003), and
   shift/alt/ctrl modifiers. *(Click injection not auto-tested here — no xdotool;
   verified against the xterm spec.)*
+- **7 — Scroll = `O(rows)`.** A row-pointer map (`rmap`: logical→physical row) makes
+  scrolling rotate pointers + clear one row instead of copying every cell. Realistic
+  cat-like throughput 41 → **144 MB/s** (see [BENCHMARK.md](BENCHMARK.md)).
+- **8 — Mouse selection + clipboard.** Drag-to-select on the grid (or Shift-drag when
+  an app holds the mouse), copy to the system clipboard, paste via middle-click /
+  Ctrl+Shift+V with **bracketed paste** (`?2004`). Selection-text extraction verified
+  headlessly; the drag + clipboard FFI need interactive testing.
 
 ## Next — daily-driver quality
 
-- **7 — Mouse selection + clipboard.** Drag-to-select on the grid; copy to the X11
-  clipboard; paste (with bracketed-paste). Emulator-level — tmux can't do this for
-  you. (Also support OSC 52.)
-- **8 — Text attributes.** Bold (distinct from bright), underline, italic, dim,
+- **9 — Text attributes.** Bold (distinct from bright), underline, italic, dim,
   inverse already done; strike. Needs bold/italic font faces or synthesis.
-- **9 — Native scrollback.** Backlog above the viewport with wheel/PageUp.
+- **10 — Native scrollback.** Backlog above the viewport with wheel/PageUp.
   *Lower priority:* in a tmux-centric workflow tmux owns scrollback; this mainly
   helps the moments you're outside tmux.
-- **10 — Configuration.** Font family/size, color palette, default geometry,
+- **11 — Configuration.** Font family/size, color palette, default geometry,
   cursor style — via a simple file or flags.
 
 ## Polish / correctness backlog
@@ -43,8 +47,8 @@ a shell, full-screen TUIs, and **tmux**. Multiplexing is tmux's job (see VISION)
 - Cursor shapes (DECSCUSR) + blink; focus in/out events (`?1004`).
 - True Unicode width: wide (CJK/emoji) and zero-width/combining glyphs.
 - DEC special-graphics charset (`ESC(0`) mapping (fallback when a TUI isn't UTF-8).
-- Bracketed-paste *forwarding* to apps (`?2004`), not just swallowing.
-- Performance pass (dirty-region redraw, render-to-texture) if needed at large sizes.
+- OSC 52 clipboard (let remote apps set the clipboard).
+- Render perf: dirty-region redraw / render-to-texture if needed at large sizes.
 
 ## Explicit non-goals
 
